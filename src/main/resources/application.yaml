@@ -44,10 +44,10 @@ spring:
       pool-name: DevTestHikariCP
       max-lifetime: 7200000
       connection-timeout: 30000
-  jpa:
-    properties:
-      hibernate:
-        jdbc:
-          lob:
+#  jpa:
+#    properties:
+#      hibernate:
+#        jdbc:
+#          lob:
             # Avoid unnecessary PostgreSQL large-object creation warnings.
-            non_contextual_creation: true
+#            non_contextual_creation: true
