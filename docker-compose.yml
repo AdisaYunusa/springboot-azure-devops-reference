@@ -1,0 +1,179 @@
+services:
+  db:
+    # Use the official PostgreSQL image as required by the assessment.
+    # A separate database Dockerfile is unnecessary for this local stack.
+    image: postgres:16
+
+    # Restart after unexpected failures or Docker daemon restarts, unless the
+    # container was deliberately stopped.
+    restart: unless-stopped
+
+    environment:
+      # The official PostgreSQL image creates this database during first-time
+      # initialisation of an empty data volume.
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+
+      # POSTGRES_USER is optional. If it is omitted or left empty, Compose
+      # supplies `postgres`, which matches the official image's default user.
+      #
+      # This keeps the database and application connection identities aligned.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+
+      # A database password is mandatory. Compose fails immediately with a
+      # clear message if it is missing or empty.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+
+    ports:
+      # Publish PostgreSQL only on the Docker host's loopback interface.
+      #
+      # This permits local access through psql, DBeaver or pgAdmin without
+      # exposing PostgreSQL through every network interface on the host.
+      #
+      # The application does not use this host mapping. It connects internally
+      # to db:5432 through the Compose network.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+
+    volumes:
+      # Persist local database data independently of the container lifecycle.
+      # The data remains when containers are stopped or recreated.
+      #
+      # `docker compose down --volumes` explicitly removes this data.
+      - db-data:/var/lib/postgresql/data
+
+    healthcheck:
+      # Verify that PostgreSQL is ready to accept connections.
+      #
+      # The doubled dollar signs defer variable expansion until the command
+      # runs inside the container. POSTGRES_USER will already contain either
+      # the supplied value or the Compose default of `postgres`.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready --username=\"$${POSTGRES_USER}\" --dbname=\"$${POSTGRES_DB}\""
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+    networks:
+      - backend-network # Docker network is named explicitly for clarity and future extensibility.
+
+  app:
+    # Build the Spring Boot application using the multi-stage Dockerfile in the
+    # repository root.
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Local image name. The CI pipeline will later apply traceable and immutable
+    # tags such as the Git commit SHA.
+    image: hmcts-dev-test-backend:local
+
+    restart: unless-stopped
+
+    depends_on:
+      db:
+        # Wait until PostgreSQL is accepting connections, rather than merely
+        # waiting for the database container process to start.
+        #
+        # This prevents the application from starting while PostgreSQL is still
+        # completing its first-time initialisation.
+        condition: service_healthy
+
+    environment:
+      # Port on which Spring Boot listens inside the application container.
+      # This preserves the SERVER_PORT configuration supplied by the starter
+      # repository and defaults to 4000 when it is not set.
+      SERVER_PORT: ${SERVER_PORT:-4000}
+
+      # These variables match the placeholders configured in application.yaml.
+      #
+      # Docker's internal DNS resolves the service name `db` to the PostgreSQL
+      # container. `localhost` would incorrectly refer to the app container.
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+
+      # Use the explicitly supplied PostgreSQL user when present; otherwise use
+      # the default PostgreSQL administrator account, `postgres`.
+      DB_USER_NAME: ${POSTGRES_USER:-postgres}
+
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+
+      # Optional suffix appended to the JDBC URL. Leave empty unless additional
+      # PostgreSQL connection options are required.
+      #
+      # Example:
+      # DB_OPTIONS=?sslmode=disable
+      DB_OPTIONS: ${DB_OPTIONS:-}
+
+      # Optional JVM arguments can be supplied without modifying or rebuilding
+      # the image. Java reads JAVA_TOOL_OPTIONS automatically.
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:-}
+
+    ports:
+      # APP_HOST_PORT controls the port used on the local Docker host.
+      # SERVER_PORT controls the port used by Spring Boot inside the container.
+      #
+      # Example:
+      # APP_HOST_PORT=8080
+      # SERVER_PORT=4000
+      #
+      # Results in:
+      # http://localhost:8080 -> application container port 4000
+      #
+      # Binding to 127.0.0.1 keeps this local assessment environment from being
+      # exposed through the host's other network interfaces.
+      - "127.0.0.1:${APP_HOST_PORT:-4000}:${SERVER_PORT:-4000}"
+
+    healthcheck:
+      # The /health endpoint includes the PostgreSQL health indicator. This
+      # therefore verifies both Spring Boot availability and database access.
+      #
+      # --fail causes curl to return a non-zero exit code for HTTP 4xx and 5xx
+      # responses, allowing Docker to mark the container unhealthy.
+      #
+      # SERVER_PORT is expanded by the shell inside the app container.
+      test:
+        [
+          "CMD-SHELL",
+          "curl --fail --silent --show-error \"http://localhost:$${SERVER_PORT:-4000}/health\" > /dev/null || exit 1"
+        ]
+      interval: 15s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
+
+    # Prevent the application process from gaining additional privileges.
+    security_opt:
+      - no-new-privileges:true
+
+    # The stateless application does not require additional Linux capabilities.
+    cap_drop:
+      - ALL
+
+    # Keep the container filesystem read-only so the running application cannot
+    # modify its deployed files. A writable temporary filesystem is provided
+    # separately for JVM and framework temporary files.
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    # Allow Spring Boot time to complete its configured graceful shutdown after
+    # receiving SIGTERM.
+    stop_grace_period: 30s
+
+    networks:
+      - backend-network # Docker network is named explicitly for clarity and future extensibility.
+
+volumes:
+  # Docker-managed persistent storage for the local PostgreSQL database.
+  db-data:
+
+networks:
+  # Private bridge network used for communication between the application and
+  # database containers. Docker DNS makes the `db` service name resolvable.
+  backend-network:
+    driver: bridge

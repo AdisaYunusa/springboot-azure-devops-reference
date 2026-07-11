@@ -1,65 +1,103 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 
-##########################################################################
-# Stage 1 — Build
-# Uses the Gradle wrapper committed in the repo so the build tool version
-# is pinned by the project, not by whatever happens to be on the image.
-##########################################################################
-FROM eclipse-temurin:21-jdk-jammy AS build
+###############################################################################
+# Stage 1: Build the application using Java 21 on Ubuntu 26.04 LTS.
+#
+# The project requires Java 21 through the Gradle toolchain configured in
+# build.gradle. The repository's Gradle Wrapper is used so the Gradle version
+# remains controlled by the project rather than by the container image.
+###############################################################################
+FROM eclipse-temurin:21-jdk-resolute AS build
 
-WORKDIR /home/gradle/app
+WORKDIR /workspace
 
-# Leverage Docker layer caching: copy only the files Gradle needs to
-# resolve dependencies first, so `./gradlew dependencies` is cached and
-# skipped on rebuilds that only change application source.
+# Copy the Gradle Wrapper and build configuration before the application source.
+# This allows Docker to reuse the dependency-resolution layer when only source
+# files change, improving repeat build times.
 COPY gradlew ./
 COPY gradle ./gradle
-COPY build.gradle settings.gradle* ./
-RUN chmod +x gradlew && ./gradlew --no-daemon dependencies || true
+COPY build.gradle ./
 
-# Now copy the rest of the source and build the real artifact.
-COPY . .
-RUN ./gradlew --no-daemon clean build -x test \
-    && find /home/gradle/app/build/libs -name '*.jar' ! -name '*-plain.jar' -exec cp {} /home/gradle/app/app.jar \;
+# The HMCTS Gradle plugin references configuration files such as the OWASP
+# Dependency Check suppression file during project configuration.
+COPY config ./config
 
-##########################################################################
-# Stage 2 — Runtime
-# JRE-only, non-root, distroless-adjacent base to keep the attack surface
-# and image size down (this alone cuts image size roughly in half versus
-# shipping the JDK, and removes the compiler toolchain from what ships
-# to production).
-##########################################################################
-FROM eclipse-temurin:21-jre-jammy AS runtime
+# Ensure the Gradle Wrapper uses Unix line endings and is executable.
+RUN sed -i 's/\r$//' ./gradlew \
+    && chmod +x ./gradlew
 
-# Curl is required for the container healthcheck below, calling the
-# Spring Boot Actuator /health endpoint added in Part 1.
+# Use a BuildKit cache mount so downloaded Gradle dependencies can be reused
+# across image builds. Dependency failures are intentionally not suppressed.
+RUN --mount=type=cache,target=/root/.gradle \
+    ./gradlew --no-daemon dependencies
+
+# Copy application source only after dependency resolution, preserving the
+# cached dependency layer when application code changes.
+COPY src ./src
+
+# CI runs the complete test suite, Checkstyle and other quality gates.
+# The image-build stage is responsible only for producing the executable JAR.
+RUN --mount=type=cache,target=/root/.gradle \
+    ./gradlew --no-daemon bootJar
+
+
+###############################################################################
+# Stage 2: Run the application using Java 21 on Ubuntu 26.04 LTS.
+#
+# The final image contains only the Java runtime and built application.
+# Gradle, source code and the Java compiler remain in the build stage, reducing
+# the production image size and attack surface.
+###############################################################################
+FROM eclipse-temurin:21-jre-resolute AS runtime
+
+# curl is installed solely for the container health check against the Spring
+# Boot Actuator endpoint. Package metadata is removed from the same layer.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install --yes --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Dedicated, unprivileged system user/group — the app never runs as root,
-# fixed UID/GID (not just `useradd` defaults) so the same numeric ID is
-# predictable and can be pinned in Kubernetes/Container Apps securityContext.
-RUN groupadd --gid 1000 spring \
-    && useradd --uid 1000 --gid spring --shell /usr/sbin/nologin --create-home spring
+# Create a predictable, unprivileged runtime identity. A writable home directory
+# is provided separately from /app, while the application files remain
+# root-owned and read-only to the runtime process.
+RUN groupadd --gid 10001 appgroup \
+    && useradd \
+        --uid 10001 \
+        --gid appgroup \
+        --create-home \
+        --home-dir /home/appuser \
+        --shell /usr/sbin/nologin \
+        appuser
 
 WORKDIR /app
 
-COPY --from=build --chown=spring:spring /home/gradle/app/app.jar ./app.jar
+# build.gradle explicitly pins bootJar.archiveFileName to test-backend.jar.
+# Using the exact filename keeps artifact selection deterministic and avoids
+# accidentally copying another JAR if additional artifacts are produced later.
+COPY --from=build \
+    /workspace/build/libs/test-backend.jar \
+    /app/app.jar
 
-USER spring:spring
+# Optional JVM settings can be supplied at deployment time without introducing
+# a shell-based entrypoint, for example:
+# JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0"
+ENV JAVA_TOOL_OPTIONS=""
 
+# Run the application as the unprivileged identity created above.
+USER appuser:appgroup
+
+# Documents the port used by the Spring Boot service. Port publication is
+# configured separately through Docker Compose or the deployment platform.
 EXPOSE 4000
 
-# Sensible JVM defaults for a containerised workload: respect cgroup
-# memory limits rather than reading host memory, and allow tuning via
-# an env var at deploy time without editing the image.
-ENV JAVA_OPTS=""
+# The health endpoint includes the database health indicator, allowing Docker
+# and orchestrators to determine whether the application can reach PostgreSQL,
+# rather than checking only whether the Java process is running.
+HEALTHCHECK --interval=15s \
+            --timeout=5s \
+            --start-period=40s \
+            --retries=5 \
+    CMD curl --fail --silent --show-error http://localhost:${SERVER_PORT:-4000}/health || exit 1
 
-# Container-level healthcheck wired to the DB-aware /health endpoint
-# from Part 1, so Compose/orchestrators know the app is not just "up"
-# but actually able to reach Postgres.
-HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=5 \
-    CMD curl --fail http://localhost:4000/health || exit 1
-
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+# Exec form keeps Java as PID 1 so SIGTERM is delivered directly to Spring Boot,
+# allowing the application's configured graceful shutdown behaviour to run.
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

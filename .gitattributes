@@ -1,0 +1,6 @@
+# Linux shell scripts must use LF line endings so they can run inside containers.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Preserve the Windows Gradle wrapper script as CRLF.
+gradlew.bat text eol=crlf
