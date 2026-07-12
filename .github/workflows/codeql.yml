@@ -23,7 +23,7 @@ on:
 jobs:
   analyze:
     name: Analyze
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -57,13 +57,20 @@ jobs:
     - uses: actions/setup-java@v5
       with:
         distribution: 'temurin' # See 'Supported distributions' for available options
-        java-version: '17'
+        java-version: '21'
 
 
     # Autobuild attempts to build any compiled languages  (C/C++, C#, Go, or Java).
     # If this step fails, then you should remove it and run the build manually (see below)
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@v4
+    # - name: Autobuild
+    #   uses: github/codeql-action/autobuild@v4
+
+    # Replace CodeQL autobuild with an explicit Gradle build so the Java 21
+    # application is compiled in a predictable and controlled way.
+    - name: Compile application for CodeQL
+      run: |
+        chmod +x ./gradlew
+        ./gradlew clean classes --no-daemon --stacktrace
 
     # ℹ️ Command-line programs to run using the OS shell.
     # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
