@@ -38,7 +38,7 @@ jobs:
   ##############################################################################
   build-test:
     name: Build and Test
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     permissions:
@@ -113,7 +113,7 @@ jobs:
   ##############################################################################
   static-analysis:
     name: Static Analysis
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -163,7 +163,7 @@ jobs:
   ##############################################################################
   source-security:
     name: Source Security
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -194,7 +194,7 @@ jobs:
           exit-code: "1"
 
   ##############################################################################
-  # 5. Build the container image exactly once.
+  # 4. Build the container image exactly once.
   #
   # The full Git SHA gives a one-to-one traceability link between the source
   # commit and image. SemVer is intentionally deferred until the repository has
@@ -205,7 +205,7 @@ jobs:
   ##############################################################################
   docker-build:
     name: Container Build
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     needs:
@@ -308,14 +308,14 @@ jobs:
           retention-days: 3
 
   ##############################################################################
-  # 6. Scan the exact image produced by docker-build.
+  # 5. Scan the exact image produced by docker-build.
   #
   # HIGH findings are warnings as required by the assessment. CRITICAL
   # vulnerabilities and secrets embedded in the image are blocking.
   ##############################################################################
   image-scan:
     name: Container Security Scan
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     needs:
@@ -414,12 +414,12 @@ jobs:
           exit-code: "1"
 
   ##############################################################################
-  # 7. Start the exact built image with PostgreSQL and test it as a running
+  # 6. Start the exact built image with PostgreSQL and test it as a running
   #    service. --no-build prevents Docker Compose from silently rebuilding.
   ##############################################################################
   container-functional:
     name: Container Functional Tests
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     needs:
@@ -631,14 +631,14 @@ jobs:
         run: docker compose down --volumes --remove-orphans
 
   ##############################################################################
-  # 8. Aggregate all mandatory checks into one stable branch-protection status.
+  # 7. Aggregate all mandatory checks into one stable branch-protection status.
   #
   # Configure "CI Gate" as a required check on master. This job does not run a
   # new test; it decides whether every required test/check succeeded.
   ##############################################################################
   ci-gate:
     name: CI Gate
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     if: always()
@@ -700,7 +700,7 @@ jobs:
           echo "All mandatory CI checks passed."
 
   ##############################################################################
-  # 9. Publish only from a successful push to master.
+  # 8. Publish only from a successful push to master.
   #
   # Feature branches and pull requests build, test and scan the image but never
   # publish it. The exact image artifact that passed CI is loaded and pushed;
@@ -708,7 +708,7 @@ jobs:
   ##############################################################################
   publish:
     name: Publish Container Image
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     needs:

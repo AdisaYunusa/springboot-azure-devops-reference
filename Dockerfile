@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
 ###############################################################################
-# Stage 1: Build the application using Java 21 on Ubuntu 26.04 LTS.
+# Stage 1: Build the application using Java 21 on Ubuntu 24.04 LTS.
 #
 # The project requires Java 21 through the Gradle toolchain configured in
 # build.gradle. The repository's Gradle Wrapper is used so the Gradle version
 # remains controlled by the project rather than by the container image.
 ###############################################################################
-FROM eclipse-temurin:21-jdk-resolute AS build
+FROM eclipse-temurin:21-jdk-noble AS build
 
 WORKDIR /workspace
 
@@ -42,13 +42,13 @@ RUN --mount=type=cache,target=/root/.gradle \
 
 
 ###############################################################################
-# Stage 2: Run the application using Java 21 on Ubuntu 26.04 LTS.
+# Stage 2: Run the application using Java 21 on Ubuntu 24.04 LTS.
 #
 # The final image contains only the Java runtime and built application.
 # Gradle, source code and the Java compiler remain in the build stage, reducing
 # the production image size and attack surface.
 ###############################################################################
-FROM eclipse-temurin:21-jre-resolute AS runtime
+FROM eclipse-temurin:21-jre-noble AS runtime
 
 # curl is installed solely for the container health check against the Spring
 # Boot Actuator endpoint. Package metadata is removed from the same layer.
