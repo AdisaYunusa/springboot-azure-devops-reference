@@ -1,22 +1,851 @@
-name: Template CI
+name: HMCTS DevOps CI
 
 on:
+  # Run validation for every pushed commit on every branch.
+  push:
+
+  # Validate the proposed merge result before changes can enter master.
   pull_request:
     branches:
       - master
-  push:
-    branches:
-      - master
+
+  # Allow an authorised user to run the workflow manually.
+  workflow_dispatch:
+
+# Cancel an older run when a newer commit is pushed to the same branch or PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Apply least privilege by default. Jobs request extra permissions only when needed.
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "21"
+
+  # The exact image archive is passed between jobs so it is built only once.
+  IMAGE_ARTIFACT_NAME: container-image-${{ github.sha }}
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  ##############################################################################
+  # 1. Compile the application and run tests that do not require a separately
+  #    deployed application.
+  #
+  # The repository defines the standard Gradle `test` task and a custom
+  # `integration` task. Compilation runs automatically as a dependency of these
+  # tasks. Functional and smoke tests run later against the built container.
+  ##############################################################################
+  build-test:
+    name: Build and Test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      checks: write
+
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin' # See 'Supported distributions' for available options
-          java-version: '17'
-          cache: 'gradle'
-      - name: Build
-        run: ./gradlew check
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle and dependency cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Make Gradle Wrapper executable
+        run: chmod +x ./gradlew
+
+      # build.gradle applies -Werror to every JavaCompile task. Consequently,
+      # compiler warnings in main or test source sets are intentional build
+      # failures, independently of whether the test assertions would pass.
+      - name: Compile and run unit and integration tests
+        run: |
+          ./gradlew \
+            clean \
+            test \
+            integration \
+            jacocoTestReport \
+            --no-daemon \
+            --stacktrace
+
+      # Fork pull requests receive a read-only token, so GitHub check annotations
+      # are created only when the workflow has permission to write checks.
+      - name: Publish JUnit test annotations
+        if: >-
+          always() &&
+          !cancelled() &&
+          (
+            github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
+        uses: dorny/test-reporter@v3
+        with:
+          name: Unit and Integration Tests
+          path: build/test-results/**/*.xml
+          reporter: java-junit
+          fail-on-error: "false"
+          fail-on-empty: "false"
+
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gradle-test-reports-${{ github.sha }}
+          path: |
+            build/reports/tests/
+            build/reports/jacoco/
+            build/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  ##############################################################################
+  # 2. Run Checkstyle separately from tests.
+  #
+  # This gives developers independent feedback: a test failure does not hide a
+  # style failure, and a Checkstyle-only fix receives feedback without waiting
+  # for the test job to finish first.
+  ##############################################################################
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle and dependency cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Make Gradle Wrapper executable
+        run: chmod +x ./gradlew
+
+      # Gradle creates Checkstyle tasks for the main, unit-test and custom
+      # integration/functional/smoke source sets configured by this repository.
+      - name: Run Checkstyle
+        run: |
+          ./gradlew \
+            checkstyleMain \
+            checkstyleTest \
+            checkstyleIntegrationTest \
+            checkstyleFunctionalTest \
+            checkstyleSmokeTest \
+            --no-daemon \
+            --stacktrace
+
+      - name: Upload Checkstyle reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: checkstyle-reports-${{ github.sha }}
+          path: build/reports/checkstyle/
+          if-no-files-found: warn
+          retention-days: 7
+
+  ##############################################################################
+  # 3. Scan repository source before the image is built.
+  #
+  # The final image does not contain the Dockerfile, Compose file or Terraform
+  # source, so repository-level secret and misconfiguration checks are needed
+  # in addition to the later container-image vulnerability scan.
+  ##############################################################################
+  source-security:
+    name: Source Security
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      # Any detected committed secret is treated as blocking.
+      - name: Block committed secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          exit-code: "1"
+
+      # HIGH and CRITICAL Dockerfile/IaC misconfigurations block the workflow.
+      # A justified exception should be documented in .trivyignore.yaml rather
+      # than hidden with continue-on-error.
+      - name: Block HIGH and CRITICAL misconfigurations
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  ##############################################################################
+  # 5. Build the container image exactly once.
+  #
+  # The full Git SHA gives a one-to-one traceability link between the source
+  # commit and image. SemVer is intentionally deferred until the repository has
+  # a formal versioned-release process.
+  #
+  # The image is exported as an artifact so scanning, functional testing and
+  # publishing all use the exact same bytes rather than rebuilding.
+  ##############################################################################
+  docker-build:
+    name: Container Build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+
+    needs:
+      - build-test
+      - static-analysis
+      - source-security
+
+    outputs:
+      image-repository: ${{ steps.metadata.outputs.image-repository }}
+      image-tag: ${{ steps.metadata.outputs.image-tag }}
+      image-reference: ${{ steps.metadata.outputs.image-reference }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Create image metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # OCI registry repository names must be lowercase.
+          IMAGE_REPOSITORY="ghcr.io/${GITHUB_REPOSITORY,,}"
+          IMAGE_TAG="sha-${GITHUB_SHA}"
+          IMAGE_REFERENCE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "image-repository=${IMAGE_REPOSITORY}" >> "${GITHUB_OUTPUT}"
+          echo "image-tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "image-reference=${IMAGE_REFERENCE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build container image
+        env:
+          IMAGE_REFERENCE: ${{ steps.metadata.outputs.image-reference }}
+        run: |
+          set -euo pipefail
+
+          CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          docker buildx build \
+            --file Dockerfile \
+            --tag "${IMAGE_REFERENCE}" \
+            --label "org.opencontainers.image.title=${GITHUB_REPOSITORY#*/}" \
+            --label "org.opencontainers.image.description=HMCTS Dev Test Backend" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.created=${CREATED_AT}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --load \
+            .
+
+      - name: Record image information
+        env:
+          IMAGE_REFERENCE: ${{ steps.metadata.outputs.image-reference }}
+        run: |
+          set -euo pipefail
+
+          IMAGE_SIZE_BYTES="$(
+            docker image inspect \
+              --format '{{.Size}}' \
+              "${IMAGE_REFERENCE}"
+          )"
+
+          IMAGE_SIZE_MB="$(
+            awk "BEGIN {printf \"%.1f\", ${IMAGE_SIZE_BYTES}/1024/1024}"
+          )"
+
+          {
+            echo "## Built container image"
+            echo
+            echo "- Image: \`${IMAGE_REFERENCE}\`"
+            echo "- Local size: \`${IMAGE_SIZE_MB} MB\`"
+            echo "- Source commit: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Export exact image for downstream jobs
+        env:
+          IMAGE_REFERENCE: ${{ steps.metadata.outputs.image-reference }}
+        run: |
+          set -euo pipefail
+
+          docker save "${IMAGE_REFERENCE}" |
+            gzip --fast > image.tar.gz
+
+          sha256sum image.tar.gz > image.tar.gz.sha256
+
+      - name: Upload built image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+          path: |
+            image.tar.gz
+            image.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  ##############################################################################
+  # 6. Scan the exact image produced by docker-build.
+  #
+  # HIGH findings are warnings as required by the assessment. CRITICAL
+  # vulnerabilities and secrets embedded in the image are blocking.
+  ##############################################################################
+  image-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+
+    needs:
+      - docker-build
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Download built image
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+          path: container-artifact
+
+      - name: Verify and load built image
+        working-directory: container-artifact
+        run: |
+          set -euo pipefail
+
+          sha256sum --check image.tar.gz.sha256
+          gzip --decompress --stdout image.tar.gz | docker load
+
+      # Human-readable report. HIGH findings are visible but do not fail CI.
+      - name: Report HIGH and CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.docker-build.outputs.image-reference }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          format: table
+          ignore-unfixed: "false"
+          exit-code: "0"
+
+      # SARIF keeps the same HIGH/CRITICAL findings available for later triage.
+      - name: Generate vulnerability SARIF
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.docker-build.outputs.image-reference }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-results.sarif
+          ignore-unfixed: "false"
+          exit-code: "0"
+
+      - name: Upload SARIF to GitHub code scanning
+        if: >-
+          always() &&
+          hashFiles('trivy-results.sarif') != '' &&
+          (
+            github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: container-image
+
+      - name: Upload SARIF as a workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-results-${{ github.sha }}
+          path: trivy-results.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Secrets in the final image are always blocking.
+      - name: Block secrets embedded in the image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.docker-build.outputs.image-reference }}
+          scanners: secret
+          format: table
+          exit-code: "1"
+
+      # This is the mandatory vulnerability gate from the assessment.
+      - name: Block CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.docker-build.outputs.image-reference }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL
+          format: table
+          ignore-unfixed: "false"
+          exit-code: "1"
+
+  ##############################################################################
+  # 7. Start the exact built image with PostgreSQL and test it as a running
+  #    service. --no-build prevents Docker Compose from silently rebuilding.
+  ##############################################################################
+  container-functional:
+    name: Container Functional Tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+
+    needs:
+      - docker-build
+
+    permissions:
+      contents: read
+      checks: write
+
+    env:
+      SERVER_PORT: "4000"
+      APP_HOST_PORT: "4000"
+      POSTGRES_DB: devtest
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_PORT: "5432"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle and dependency cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Make Gradle Wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Download built image
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+          path: container-artifact
+
+      - name: Verify and load built image
+        working-directory: container-artifact
+        run: |
+          set -euo pipefail
+
+          sha256sum --check image.tar.gz.sha256
+          gzip --decompress --stdout image.tar.gz | docker load
+
+      # docker-compose.yml expects hmcts-dev-test-backend:local. Adding another
+      # tag does not change the image content or image ID.
+      - name: Tag image for Docker Compose
+        env:
+          SOURCE_IMAGE: ${{ needs.docker-build.outputs.image-reference }}
+        run: |
+          docker tag \
+            "${SOURCE_IMAGE}" \
+            hmcts-dev-test-backend:local
+
+      - name: Generate temporary database password
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TEMP_DB_PASSWORD="$(openssl rand -hex 32)"
+
+          echo "::add-mask::${TEMP_DB_PASSWORD}"
+
+          {
+            echo "POSTGRES_PASSWORD=${TEMP_DB_PASSWORD}"
+            echo "DB_PASSWORD=${TEMP_DB_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Start application and PostgreSQL
+        run: docker compose up --detach --no-build
+
+      - name: Wait for application health check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_CONTAINER_ID="$(docker compose ps --quiet app)"
+
+          if [[ -z "${APP_CONTAINER_ID}" ]]; then
+            echo "::error::The application container was not created."
+            docker compose ps
+            docker compose logs --no-color
+            exit 1
+          fi
+
+          for attempt in $(seq 1 30); do
+            HEALTH_STATUS="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "${APP_CONTAINER_ID}"
+            )"
+
+            echo "Health attempt ${attempt}/30: ${HEALTH_STATUS}"
+
+            if [[ "${HEALTH_STATUS}" == "healthy" ]]; then
+              exit 0
+            fi
+
+            if [[ "${HEALTH_STATUS}" == "unhealthy" ]]; then
+              echo "::error::Application container became unhealthy."
+              docker compose ps
+              docker compose logs --no-color app db
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          echo "::error::Application did not become healthy within 150 seconds."
+          docker compose ps
+          docker compose logs --no-color app db
+          exit 1
+
+      - name: Verify application endpoints and database readiness
+        run: |
+          set -euo pipefail
+
+          curl --fail --silent --show-error http://localhost:4000/
+          curl --fail --silent --show-error http://localhost:4000/get-example-case
+          curl --fail --silent --show-error http://localhost:4000/health
+          curl --fail --silent --show-error http://localhost:4000/health/readiness
+
+      - name: Verify Docker health status and non-root execution
+        run: |
+          set -euo pipefail
+
+          APP_HEALTH="$(
+            docker inspect \
+              --format '{{.State.Health.Status}}' \
+              "$(docker compose ps --quiet app)"
+          )"
+
+          DB_HEALTH="$(
+            docker inspect \
+              --format '{{.State.Health.Status}}' \
+              "$(docker compose ps --quiet db)"
+          )"
+
+          echo "Application health: ${APP_HEALTH}"
+          echo "Database health: ${DB_HEALTH}"
+
+          [[ "${APP_HEALTH}" == "healthy" ]]
+          [[ "${DB_HEALTH}" == "healthy" ]]
+
+          # The application container must not run as root.
+          docker compose exec --no-TTY app id |
+            grep --fixed-strings 'uid=10001(appuser)'
+
+      # The starter functional and smoke tests currently load a Spring context.
+      # SERVER_PORT=0 prevents that test JVM from competing with the Compose app
+      # on port 4000, while TEST_URL points RestAssured at the real container.
+      - name: Run functional and smoke test suites
+        env:
+          TEST_URL: http://localhost:4000
+          SERVER_PORT: "0"
+          DB_HOST: 127.0.0.1
+          DB_PORT: "5432"
+          DB_NAME: ${{ env.POSTGRES_DB }}
+          DB_USER_NAME: ${{ env.POSTGRES_USER }}
+          DB_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        run: |
+          ./gradlew \
+            functional \
+            smoke \
+            --no-daemon \
+            --stacktrace
+
+      - name: Publish functional and smoke test annotations
+        if: >-
+          always() &&
+          !cancelled() &&
+          (
+            github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
+        uses: dorny/test-reporter@v3
+        with:
+          name: Container Functional and Smoke Tests
+          path: |
+            build/test-results/functional/*.xml
+            build/test-results/smoke/*.xml
+          reporter: java-junit
+          fail-on-error: "false"
+          fail-on-empty: "false"
+
+      - name: Upload container-test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: container-test-reports-${{ github.sha }}
+          path: |
+            build/reports/tests/functional/
+            build/reports/tests/smoke/
+            build/test-results/functional/
+            build/test-results/smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Display container diagnostics on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color --timestamps app db
+
+      - name: Stop and clean up the Compose stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  ##############################################################################
+  # 8. Aggregate all mandatory checks into one stable branch-protection status.
+  #
+  # Configure "CI Gate" as a required check on master. This job does not run a
+  # new test; it decides whether every required test/check succeeded.
+  ##############################################################################
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+
+    if: always()
+
+    needs:
+      - build-test
+      - static-analysis
+      - source-security
+      - docker-build
+      - image-scan
+      - container-functional
+
+    steps:
+      - name: Evaluate mandatory checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_TEST="${{ needs.build-test.result }}"
+          STATIC_ANALYSIS="${{ needs.static-analysis.result }}"
+          SOURCE_SECURITY="${{ needs.source-security.result }}"
+          DOCKER_BUILD="${{ needs.docker-build.result }}"
+          IMAGE_SCAN="${{ needs.image-scan.result }}"
+          CONTAINER_FUNCTIONAL="${{ needs.container-functional.result }}"
+
+          {
+            echo "## Mandatory CI checks"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Build and test | ${BUILD_TEST} |"
+            echo "| Static analysis | ${STATIC_ANALYSIS} |"
+            echo "| Source secret/misconfiguration scan | ${SOURCE_SECURITY} |"
+            echo "| Container build | ${DOCKER_BUILD} |"
+            echo "| Container security scan | ${IMAGE_SCAN} |"
+            echo "| Container functional tests | ${CONTAINER_FUNCTIONAL} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          FAILED=0
+
+          for RESULT in \
+            "${BUILD_TEST}" \
+            "${STATIC_ANALYSIS}" \
+            "${SOURCE_SECURITY}" \
+            "${DOCKER_BUILD}" \
+            "${IMAGE_SCAN}" \
+            "${CONTAINER_FUNCTIONAL}"
+          do
+            if [[ "${RESULT}" != "success" ]]; then
+              FAILED=1
+            fi
+          done
+
+          if [[ "${FAILED}" -ne 0 ]]; then
+            echo "::error::One or more mandatory CI checks did not succeed."
+            exit 1
+          fi
+
+          echo "All mandatory CI checks passed."
+
+  ##############################################################################
+  # 9. Publish only from a successful push to master.
+  #
+  # Feature branches and pull requests build, test and scan the image but never
+  # publish it. The exact image artifact that passed CI is loaded and pushed;
+  # the publish job does not rebuild it.
+  ##############################################################################
+  publish:
+    name: Publish Container Image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+
+    needs:
+      - ci-gate
+      - docker-build
+
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      needs.ci-gate.result == 'success'
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Download approved image
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+          path: container-artifact
+
+      - name: Verify and load approved image
+        working-directory: container-artifact
+        run: |
+          set -euo pipefail
+
+          sha256sum --check image.tar.gz.sha256
+          gzip --decompress --stdout image.tar.gz | docker load
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generate a release SBOM from the same image that passed testing/scanning.
+      - name: Generate SPDX JSON SBOM
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.docker-build.outputs.image-reference }}
+          format: spdx-json
+          output: sbom.spdx.json
+          exit-code: "0"
+
+      - name: Push approved image tags
+        id: push
+        shell: bash
+        env:
+          SHA_IMAGE: ${{ needs.docker-build.outputs.image-reference }}
+          IMAGE_REPOSITORY: ${{ needs.docker-build.outputs.image-repository }}
+        run: |
+          set -euo pipefail
+
+          MASTER_IMAGE="${IMAGE_REPOSITORY}:master"
+          LATEST_IMAGE="${IMAGE_REPOSITORY}:latest"
+
+          # The full-SHA tag is the traceable source reference.
+          # master and latest are mutable convenience tags.
+          docker tag "${SHA_IMAGE}" "${MASTER_IMAGE}"
+          docker tag "${SHA_IMAGE}" "${LATEST_IMAGE}"
+
+          docker push "${SHA_IMAGE}" 2>&1 | tee push-output.txt
+
+          DIGEST="$(
+            sed -n \
+              's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' \
+              push-output.txt |
+              tail -n 1
+          )"
+
+          if [[ ! "${DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::Unable to determine the published image digest."
+            exit 1
+          fi
+
+          docker push "${MASTER_IMAGE}"
+          docker push "${LATEST_IMAGE}"
+
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "sha-image=${SHA_IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "master-image=${MASTER_IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "latest-image=${LATEST_IMAGE}" >> "${GITHUB_OUTPUT}"
+
+      # actions/attest is the unified current action for both provenance and
+      # SBOM attestations. The older specialised actions now wrap this action.
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ needs.docker-build.outputs.image-repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest image SBOM
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ needs.docker-build.outputs.image-repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write publication summary
+        env:
+          IMAGE_REPOSITORY: ${{ needs.docker-build.outputs.image-repository }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          SHA_IMAGE: ${{ steps.push.outputs.sha-image }}
+          MASTER_IMAGE: ${{ steps.push.outputs.master-image }}
+          LATEST_IMAGE: ${{ steps.push.outputs.latest-image }}
+        run: |
+          {
+            echo "## Published container image"
+            echo
+            echo "- Commit tag: \`${SHA_IMAGE}\`"
+            echo "- Default-branch tag: \`${MASTER_IMAGE}\`"
+            echo "- Convenience tag: \`${LATEST_IMAGE}\`"
+            echo "- Immutable digest:"
+            echo
+            echo "\`${IMAGE_REPOSITORY}@${IMAGE_DIGEST}\`"
+            echo
+            echo "The published image is the exact image archive that passed:"
+            echo
+            echo "- unit and integration tests;"
+            echo "- Checkstyle;"
+            echo "- source secret and misconfiguration scans;"
+            echo "- container vulnerability and secret scans;"
+            echo "- container functional and smoke tests; and"
+          } >> "${GITHUB_STEP_SUMMARY}"
