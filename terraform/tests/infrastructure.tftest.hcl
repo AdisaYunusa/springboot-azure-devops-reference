@@ -87,16 +87,16 @@ run "production_overrides_enable_resilience" {
   command = plan
 
   variables {
-    environment                               = "prod"
-    container_min_replicas                    = 2
-    container_max_replicas                    = 10
-    container_app_zone_redundancy_enabled     = true
-    postgresql_high_availability_enabled      = true
-    postgresql_geo_redundant_backup_enabled   = true
-    postgresql_sku_name                       = "GP_Standard_D2s_v3"
-    postgresql_storage_mb                     = 131072
-    postgresql_backup_retention_days          = 35
-    container_image                           = "ghcr.io/example/springboot-azure-devops-reference@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    environment                             = "prod"
+    container_min_replicas                  = 2
+    container_max_replicas                  = 10
+    container_app_zone_redundancy_enabled   = true
+    postgresql_high_availability_enabled    = true
+    postgresql_geo_redundant_backup_enabled = true
+    postgresql_sku_name                     = "GP_Standard_D2s_v3"
+    postgresql_storage_mb                   = 131072
+    postgresql_backup_retention_days        = 35
+    container_image                         = "ghcr.io/example/springboot-azure-devops-reference@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }
 
   assert {

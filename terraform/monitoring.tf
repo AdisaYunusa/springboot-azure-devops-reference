@@ -9,12 +9,12 @@ resource "azurerm_log_analytics_workspace" "main" {
 }
 
 resource "azurerm_container_app_environment" "main" {
-  name                           = local.names.container_environment
-  location                       = azurerm_resource_group.main.location
-  resource_group_name            = azurerm_resource_group.main.name
-  infrastructure_subnet_id       = azurerm_subnet.container_apps.id
-  log_analytics_workspace_id     = azurerm_log_analytics_workspace.main.id
-  zone_redundancy_enabled        = var.container_app_zone_redundancy_enabled
+  name                       = local.names.container_environment
+  location                   = azurerm_resource_group.main.location
+  resource_group_name        = azurerm_resource_group.main.name
+  infrastructure_subnet_id   = azurerm_subnet.container_apps.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+  zone_redundancy_enabled    = var.container_app_zone_redundancy_enabled
 
   # Explicitly creating a workload-profile environment preserves the option to
   # add dedicated profiles later without replacing the environment.

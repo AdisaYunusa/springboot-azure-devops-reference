@@ -15,7 +15,7 @@ output "backend_container_name" {
 
 output "backend_hcl" {
   description = "Copy this block into ../backend.hcl and add an environment-specific key."
-  value = <<-EOT
+  value       = <<-EOT
     resource_group_name  = "${azurerm_resource_group.state.name}"
     storage_account_name = "${azurerm_storage_account.state.name}"
     container_name       = "${azurerm_storage_container.state.name}"
