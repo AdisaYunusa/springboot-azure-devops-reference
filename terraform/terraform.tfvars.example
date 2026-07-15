@@ -1,0 +1,45 @@
+# Copy to terraform.tfvars for a cost-conscious assessment/dev/staging/QA/Prod deployment.
+# Never commit terraform.tfvars.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+organisation = "hmcts"
+workload     = "devtest"
+environment  = "dev"
+location     = "uksouth"
+region_code  = "uks"
+
+owner               = "devops-platform"
+repository          = "github.com/YOUR_GITHUB_USERNAME/springboot-azure-devops-reference"
+cost_centre         = "technical-assessment"
+data_classification = "internal"
+
+# Use the exact image produced by the successful master pipeline.
+container_image = "ghcr.io/YOUR_GITHUB_USERNAME/springboot-azure-devops-reference:sha-0000000000000000000000000000000000000000"
+
+container_cpu         = 0.5
+container_memory      = "1Gi"
+container_min_replicas = 1
+container_max_replicas = 3
+
+postgresql_version           = "16"
+postgresql_sku_name          = "B_Standard_B1ms"
+postgresql_storage_mb        = 32768
+postgresql_database_name     = "devtest"
+postgresql_administrator_login = "devtestadmin"
+
+postgresql_backup_retention_days        = 7
+postgresql_high_availability_enabled    = false
+postgresql_geo_redundant_backup_enabled = false
+
+container_app_zone_redundancy_enabled = false
+
+# Required when executing Terraform from a public workstation and the Key Vault
+# firewall is enabled. Replace with your current public address in /32 form.
+key_vault_deployer_ip_cidrs = [
+  "203.0.113.10/32",
+]
+
+additional_tags = {
+  purpose = "hmcts-devops-assessment"
+}

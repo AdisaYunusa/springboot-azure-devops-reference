@@ -28,3 +28,31 @@ applicationinsights-agent-*.jar
 .env
 .env.*
 !.env.example
+
+# Terraform working directory and local state
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Local plans may contain sensitive infrastructure data
+*.tfplan
+tfplan
+
+# Local variable and backend files
+*.auto.tfvars
+*.auto.tfvars.json
+terraform.tfvars
+backend.hcl
+
+# Terraform CLI configuration and override files
+.terraformrc
+terraform.rc
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local test state and generated files
+.terraform-test/

@@ -1,0 +1,15 @@
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "uksouth"
+organisation    = "hmcts"
+region_code     = "uks"
+owner           = "platform-engineering"
+repository      = "github.com/YOUR_GITHUB_USERNAME/springboot-azure-devops-reference"
+
+additional_tags = {
+  cost-centre = "technical-assessment"
+}
+
+# Allow the workstation or fixed-egress runner performing backend operations.
+backend_allowed_ip_cidrs = [
+  "203.0.113.10/32",
+]
