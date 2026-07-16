@@ -60,6 +60,10 @@ resource "azurerm_storage_account" "state" {
     }
   }
 
+  lifecycle {
+    prevent_destroy = true
+  }
+
   tags = local.tags
 }
 
@@ -81,6 +85,10 @@ resource "azurerm_storage_container" "state" {
   name                  = var.state_container_name
   storage_account_id    = azurerm_storage_account.state.id
   container_access_type = "private"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 
   depends_on = [
     time_sleep.wait_for_storage_rbac,
