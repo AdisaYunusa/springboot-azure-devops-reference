@@ -1,0 +1,8 @@
+# Copy this file to backend.hcl and replace the example values.
+# backend.hcl is excluded from Git by .gitignore.
+
+resource_group_name  = "hmcts-tfstate-uks-rg"
+storage_account_name = "hmctstfstate000000"
+container_name       = "tfstate"
+key                  = "hmcts-devtest/dev.tfstate"
+use_azuread_auth     = true

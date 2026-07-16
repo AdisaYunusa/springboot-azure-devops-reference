@@ -24,6 +24,9 @@ permissions:
 env:
   JAVA_VERSION: "21"
 
+  # Keep this version aligned with the required_version constraint in Part 3.
+  TERRAFORM_VERSION: "1.15.8"
+
   # The exact image archive is passed between jobs so it is built only once.
   IMAGE_ARTIFACT_NAME: container-image-${{ github.sha }}
 
@@ -194,7 +197,106 @@ jobs:
           exit-code: "1"
 
   ##############################################################################
-  # 4. Build the container image exactly once.
+  # 4. Validate the Terraform configuration created in Part 3.
+  #
+  # No Azure credentials are required because this job does not run plan or
+  # apply. It checks formatting and validates the local configuration only.
+  ##############################################################################
+  terraform-checks:
+    name: Terraform Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Confirm Terraform configuration exists
+        run: |
+          if ! find terraform -type f -name '*.tf' -print -quit | grep -q .; then
+            echo "::error::No Terraform files were found under terraform/."
+            echo "Add the Part 3 infrastructure code before enabling this as a required gate."
+            exit 1
+          fi
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        working-directory: terraform
+        run: terraform fmt -check -recursive -diff
+
+      # Disabling the backend prevents CI validation from accessing remote state.
+      # Bootstrap is an independent Terraform root module.
+      - name: Initialise bootstrap Terraform without a backend
+        working-directory: terraform/bootstrap
+        run: terraform init -backend=false -input=false
+
+      - name: Validate bootstrap Terraform configuration
+        working-directory: terraform/bootstrap
+        run: terraform validate -no-color
+
+      # Mock providers are used, so these tests do not deploy Azure resources.
+      # The bootstrap tests use mocked providers and do not deploy Azure resources.
+      - name: Run bootstrap Terraform native tests
+        working-directory: terraform/bootstrap
+        run: terraform test -no-color
+      
+      # Main infrastructure is a separate Terraform root module.
+      - name: Initialise Main Terraform without a backend
+        working-directory: terraform
+        run: terraform init -backend=false -input=false
+
+      - name: Validate Main Terraform configuration
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@v6
+        with:
+          tflint_version: v0.63.1
+
+      - name: Cache TFLint plugins
+        uses: actions/cache@v5
+        with:
+          path: ~/.tflint.d/plugins
+          key: >-
+            ${{ runner.os }}-tflint-v0.63.1-${{
+              hashFiles('terraform/.tflint.hcl')
+            }}
+
+      # Both roots use the same TFLint configuration and provider plugins.
+      - name: Initialise TFLint plugins
+        working-directory: terraform
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint \
+            --config="${GITHUB_WORKSPACE}/terraform/.tflint.hcl" \
+            --init
+
+      - name: Lint bootstrap Terraform configuration
+        working-directory: terraform/bootstrap
+        run: |
+          tflint \
+            --config="${GITHUB_WORKSPACE}/terraform/.tflint.hcl" \
+            --format compact
+
+      - name: Lint main Terraform configuration
+        working-directory: terraform
+        run: |
+          tflint \
+            --config="${GITHUB_WORKSPACE}/terraform/.tflint.hcl" \
+            --format compact
+
+  ##############################################################################
+  # 5. Build the container image exactly once.
   #
   # The full Git SHA gives a one-to-one traceability link between the source
   # commit and image. SemVer is intentionally deferred until the repository has
@@ -308,7 +410,7 @@ jobs:
           retention-days: 3
 
   ##############################################################################
-  # 5. Scan the exact image produced by docker-build.
+  # 6. Scan the exact image produced by docker-build.
   #
   # HIGH findings are warnings as required by the assessment. CRITICAL
   # vulnerabilities and secrets embedded in the image are blocking.
@@ -414,7 +516,7 @@ jobs:
           exit-code: "1"
 
   ##############################################################################
-  # 6. Start the exact built image with PostgreSQL and test it as a running
+  # 7. Start the exact built image with PostgreSQL and test it as a running
   #    service. --no-build prevents Docker Compose from silently rebuilding.
   ##############################################################################
   container-functional:
@@ -631,7 +733,7 @@ jobs:
         run: docker compose down --volumes --remove-orphans
 
   ##############################################################################
-  # 7. Aggregate all mandatory checks into one stable branch-protection status.
+  # 8. Aggregate all mandatory checks into one stable branch-protection status.
   #
   # Configure "CI Gate" as a required check on master. This job does not run a
   # new test; it decides whether every required test/check succeeded.
@@ -647,6 +749,7 @@ jobs:
       - build-test
       - static-analysis
       - source-security
+      - terraform-checks
       - docker-build
       - image-scan
       - container-functional
@@ -660,6 +763,7 @@ jobs:
           BUILD_TEST="${{ needs.build-test.result }}"
           STATIC_ANALYSIS="${{ needs.static-analysis.result }}"
           SOURCE_SECURITY="${{ needs.source-security.result }}"
+          TERRAFORM_CHECKS="${{ needs.terraform-checks.result }}"
           DOCKER_BUILD="${{ needs.docker-build.result }}"
           IMAGE_SCAN="${{ needs.image-scan.result }}"
           CONTAINER_FUNCTIONAL="${{ needs.container-functional.result }}"
@@ -672,6 +776,7 @@ jobs:
             echo "| Build and test | ${BUILD_TEST} |"
             echo "| Static analysis | ${STATIC_ANALYSIS} |"
             echo "| Source secret/misconfiguration scan | ${SOURCE_SECURITY} |"
+            echo "| Terraform checks | ${TERRAFORM_CHECKS} |"
             echo "| Container build | ${DOCKER_BUILD} |"
             echo "| Container security scan | ${IMAGE_SCAN} |"
             echo "| Container functional tests | ${CONTAINER_FUNCTIONAL} |"
@@ -683,6 +788,7 @@ jobs:
             "${BUILD_TEST}" \
             "${STATIC_ANALYSIS}" \
             "${SOURCE_SECURITY}" \
+            "${TERRAFORM_CHECKS}" \
             "${DOCKER_BUILD}" \
             "${IMAGE_SCAN}" \
             "${CONTAINER_FUNCTIONAL}"
@@ -700,7 +806,7 @@ jobs:
           echo "All mandatory CI checks passed."
 
   ##############################################################################
-  # 8. Publish only from a successful push to master.
+  # 9. Publish only from a successful push to master.
   #
   # Feature branches and pull requests build, test and scan the image but never
   # publish it. The exact image artifact that passed CI is loaded and pushed;
@@ -848,4 +954,5 @@ jobs:
             echo "- source secret and misconfiguration scans;"
             echo "- container vulnerability and secret scans;"
             echo "- container functional and smoke tests; and"
+            echo "- Terraform formatting and validation."
           } >> "${GITHUB_STEP_SUMMARY}"
