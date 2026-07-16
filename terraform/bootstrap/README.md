@@ -37,7 +37,7 @@ terraform init -backend-config=backend.hcl -reconfigure
 - TLS 1.2, infrastructure encryption, versioning, blob soft delete and
   container soft delete are enabled.
 - The storage endpoint remains publicly addressable but its firewall defaults to
-  deny and permits only explicitly supplied CIDRs; Microsoft Entra
+  deny and permits only explicitly supplied IPs; Microsoft Entra
   authentication is still required.
 - A mature enterprise implementation can replace public CIDR rules with a
   private endpoint and a self-hosted runner or fixed private deployment agent.

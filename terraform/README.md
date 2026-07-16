@@ -162,16 +162,7 @@ The default `terraform.tfvars.example` is cost-conscious:
 - seven-day backups;
 - HA and geo-redundant backup disabled.
 
-`production.tfvars.example` demonstrates stronger resilience:
-
-- at least two application replicas;
-- zone-redundant Container Apps environment;
-- General Purpose PostgreSQL;
-- zone-redundant PostgreSQL HA;
-- geo-redundant backups;
-- longer backup and log retention.
-
-These expensive controls are variables rather than hard-coded defaults so the
+These controls are variables rather than hard-coded defaults so the
 assessment can be tested economically while the production intent remains
 clear.
 
@@ -209,10 +200,8 @@ terraform/
 ├── checks.tf
 ├── outputs.tf
 ├── terraform.tfvars.example
-├── production.tfvars.example
 ├── backend.hcl.example
 ├── .tflint.hcl
-├── tests/infrastructure.tftest.hcl
 ├── bootstrap/
 └── ci/
 ```
@@ -229,7 +218,7 @@ interfaces and state complexity without meaningful reuse.
 - permission to create resource groups, networking, managed identities,
   PostgreSQL, Key Vault and role assignments
 - a successfully published GHCR image from Task 2
-- your public IP in CIDR form when applying from a public workstation
+- your public IP when applying from a public workstation
 
 Authenticate locally:
 
