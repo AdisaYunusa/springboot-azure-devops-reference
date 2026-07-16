@@ -45,7 +45,7 @@ resource "azurerm_storage_account" "state" {
   network_rules {
     default_action = "Deny"
     bypass         = ["AzureServices"]
-    ip_rules       = var.backend_allowed_ip_cidrs
+    ip_rules       = var.backend_allowed_ip_rules
   }
 
   blob_properties {

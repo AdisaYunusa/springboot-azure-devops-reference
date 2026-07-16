@@ -35,9 +35,10 @@ postgresql_geo_redundant_backup_enabled = false
 container_app_zone_redundancy_enabled = false
 
 # Required when executing Terraform from a public workstation and the Key Vault
-# firewall is enabled. Replace with your current public address in /32 form.
-key_vault_deployer_ip_cidrs = [
-  "203.0.113.10/32",
+# Replace this documentation address with the public egress IP of the
+# workstation or controlled runner used to administer Key Vault.
+key_vault_deployer_ip_rules = [
+  "203.0.113.10",
 ]
 
 additional_tags = {

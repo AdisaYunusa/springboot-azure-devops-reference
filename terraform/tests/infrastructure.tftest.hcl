@@ -24,8 +24,8 @@ variables {
   repository      = "github.com/example/springboot-azure-devops-reference"
   container_image = "ghcr.io/example/springboot-azure-devops-reference:sha-0123456789abcdef0123456789abcdef01234567"
 
-  key_vault_deployer_ip_cidrs = [
-    "203.0.113.10/32",
+  key_vault_deployer_ip_rules = [
+    "203.0.113.10",
   ]
 }
 
@@ -51,6 +51,15 @@ run "security_and_reliability_baseline" {
     condition     = azurerm_key_vault.main.network_acls[0].default_action == "Deny"
     error_message = "Key Vault network access must default to deny."
   }
+
+  assert {
+  condition = contains(
+    azurerm_key_vault.main.network_acls[0].ip_rules,
+    "203.0.113.10",
+  )
+
+  error_message = "The approved deployer public IP must be included in the Key Vault firewall rules."
+}
 
   assert {
     condition     = azurerm_container_app.application.ingress[0].allow_insecure_connections == false
@@ -118,4 +127,18 @@ run "production_overrides_enable_resilience" {
     condition     = azurerm_container_app.application.template[0].min_replicas == 2
     error_message = "Production must maintain at least two warm replicas in this example."
   }
+}
+
+run "rejects_cidr_notation_for_key_vault_deployer_ip" {
+  command = plan
+
+  variables {
+    key_vault_deployer_ip_rules = [
+      "203.0.113.10/32",
+    ]
+  }
+
+  expect_failures = [
+    var.key_vault_deployer_ip_rules,
+  ]
 }

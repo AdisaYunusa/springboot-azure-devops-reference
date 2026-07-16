@@ -220,14 +220,19 @@ variable "postgresql_subnet_cidr" {
   }
 }
 
-variable "key_vault_deployer_ip_cidrs" {
-  description = "Public IPv4 CIDRs permitted to administer Key Vault during Terraform execution, for example [\"203.0.113.10/32\"]. Keep empty only when the executing identity has an allowed private path."
+variable "key_vault_deployer_ip_rules" {
+  description = "Public IPv4 addresses permitted to administer Key Vault during Terraform execution. The assessment assumes one approved public egress IP, but the list supports additional individual addresses if required."
   type        = list(string)
   default     = []
 
   validation {
-    condition     = alltrue([for cidr in var.key_vault_deployer_ip_cidrs : can(cidrnetmask(cidr))])
-    error_message = "Every key_vault_deployer_ip_cidrs entry must be a valid CIDR."
+    condition = alltrue([
+      for ip in var.key_vault_deployer_ip_rules :
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", ip)) &&
+      can(cidrnetmask("${ip}/32"))
+    ])
+
+    error_message = "Every key_vault_deployer_ip_rules entry must be an individual IPv4 address without CIDR notation."
   }
 }
 

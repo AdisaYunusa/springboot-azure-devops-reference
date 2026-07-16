@@ -46,14 +46,27 @@ variable "repository" {
   type        = string
 }
 
-variable "backend_allowed_ip_cidrs" {
-  description = "Public IPv4 CIDRs permitted to access the Terraform state storage account."
+variable "backend_allowed_ip_rules" {
+  description = "Public IPv4 addresses or CIDR ranges permitted to access the Terraform state storage account."
   type        = list(string)
   default     = []
 
   validation {
-    condition     = alltrue([for cidr in var.backend_allowed_ip_cidrs : can(cidrnetmask(cidr))])
-    error_message = "Every backend_allowed_ip_cidrs entry must be a valid CIDR."
+    condition = alltrue([
+      for rule in var.backend_allowed_ip_rules :
+      (
+        # Accept an individual IPv4 address.
+        can(cidrnetmask("${rule}/32")) ||
+
+        # Accept an IPv4 CIDR range with a prefix between /0 and /30.
+        (
+          can(cidrnetmask(rule)) &&
+          can(regex("/([0-9]|[12][0-9]|30)$", rule))
+        )
+      )
+    ])
+
+    error_message = "Each backend_allowed_ip_rules entry must be an individual public IPv4 address or an IPv4 CIDR range with a prefix between /0 and /30."
   }
 }
 

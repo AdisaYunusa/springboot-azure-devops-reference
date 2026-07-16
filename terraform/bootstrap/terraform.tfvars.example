@@ -10,6 +10,8 @@ additional_tags = {
 }
 
 # Allow the workstation or fixed-egress runner performing backend operations.
-backend_allowed_ip_cidrs = [
-  "203.0.113.10/32",
+# Replace this documentation address with the public egress IP
+# of the workstation or controlled runner managing the backend.
+backend_allowed_ip_rules = [
+  "203.0.113.10",
 ]

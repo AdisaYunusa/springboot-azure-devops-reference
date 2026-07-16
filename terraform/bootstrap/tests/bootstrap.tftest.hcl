@@ -49,8 +49,8 @@ variables {
   owner           = "platform-engineering"
   repository      = "github.com/hmcts/hmcts-dev-test-backend"
 
-  backend_allowed_ip_cidrs = [
-    "203.0.113.10/32",
+  backend_allowed_ip_rules = [
+    "203.0.113.10",
   ]
 
   additional_tags = {
@@ -159,7 +159,7 @@ run "storage_security_and_recovery_baseline" {
   }
 
   assert {
-    condition     = contains(azurerm_storage_account.state.network_rules[0].ip_rules, "203.0.113.10/32")
+    condition     = contains(azurerm_storage_account.state.network_rules[0].ip_rules, "203.0.113.10")
     error_message = "The configured backend administrator CIDR must be applied to the storage firewall."
   }
 
@@ -274,16 +274,30 @@ run "rejects_invalid_state_retention" {
   ]
 }
 
-run "rejects_invalid_backend_cidr" {
+run "rejects_invalid_backend_ip_rule" {
   command = plan
 
   variables {
-    backend_allowed_ip_cidrs = [
-      "not-a-cidr",
+    backend_allowed_ip_rules = [
+      "not-an-ip-rule",
     ]
   }
 
   expect_failures = [
-    var.backend_allowed_ip_cidrs,
+    var.backend_allowed_ip_rules,
+  ]
+}
+
+run "rejects_unsupported_32_prefix" {
+  command = plan
+
+  variables {
+    backend_allowed_ip_rules = [
+      "203.0.113.10/32",
+    ]
+  }
+
+  expect_failures = [
+    var.backend_allowed_ip_rules,
   ]
 }
