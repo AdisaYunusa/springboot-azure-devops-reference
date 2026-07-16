@@ -44,6 +44,9 @@ resource "azurerm_postgresql_flexible_server" "main" {
   ]
 
   lifecycle {
+    # The server contains persistent application data and must not be removed
+    # through an ordinary Terraform change.
+    prevent_destroy = true
     # Azure may update the primary zone following an HA failover. Avoid forcing
     # Terraform to move the primary back solely to remove that service drift.
     ignore_changes = [
@@ -58,6 +61,11 @@ resource "azurerm_postgresql_flexible_server_database" "application" {
   server_id = azurerm_postgresql_flexible_server.main.id
   charset   = "UTF8"
   collation = "en_US.utf8"
+
+  # Protect the application database independently of the parent server.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "azurerm_postgresql_flexible_server_configuration" "require_secure_transport" {

@@ -17,6 +17,11 @@ resource "azurerm_key_vault" "main" {
     virtual_network_subnet_ids = [azurerm_subnet.container_apps.id]
   }
 
+  # Prevent accidental removal of the vault and the credentials it stores.
+  lifecycle {
+    prevent_destroy = true
+  }
+
   tags = local.common_tags
 }
 
@@ -64,6 +69,11 @@ resource "azurerm_key_vault_secret" "postgresql_username" {
   content_type = "text/plain"
   tags         = local.common_tags
 
+  # Keep the application credential available unless removal is explicitly approved.
+  lifecycle {
+    prevent_destroy = true
+  }
+
   depends_on = [
     time_sleep.wait_for_key_vault_rbac,
   ]
@@ -84,6 +94,11 @@ resource "azurerm_key_vault_secret" "postgresql_password" {
   key_vault_id     = azurerm_key_vault.main.id
   content_type     = "password"
   tags             = local.common_tags
+
+  # Password rotation updates the secret; it does not require its deletion.
+  lifecycle {
+    prevent_destroy = true
+  }
 
   depends_on = [
     time_sleep.wait_for_key_vault_rbac,

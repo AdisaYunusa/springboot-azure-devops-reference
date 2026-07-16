@@ -60,6 +60,7 @@ resource "azurerm_storage_account" "state" {
     }
   }
 
+  # Prevent accidental removal of the storage account.
   lifecycle {
     prevent_destroy = true
   }
@@ -86,6 +87,7 @@ resource "azurerm_storage_container" "state" {
   storage_account_id    = azurerm_storage_account.state.id
   container_access_type = "private"
 
+  # Prevent accidental removal of the storage container.
   lifecycle {
     prevent_destroy = true
   }
