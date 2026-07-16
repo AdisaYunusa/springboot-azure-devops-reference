@@ -53,13 +53,13 @@ run "security_and_reliability_baseline" {
   }
 
   assert {
-  condition = contains(
-    azurerm_key_vault.main.network_acls[0].ip_rules,
-    "203.0.113.10",
-  )
+    condition = contains(
+      azurerm_key_vault.main.network_acls[0].ip_rules,
+      "203.0.113.10",
+    )
 
-  error_message = "The approved deployer public IP must be included in the Key Vault firewall rules."
-}
+    error_message = "The approved deployer public IP must be included in the Key Vault firewall rules."
+  }
 
   assert {
     condition     = azurerm_container_app.application.ingress[0].allow_insecure_connections == false
