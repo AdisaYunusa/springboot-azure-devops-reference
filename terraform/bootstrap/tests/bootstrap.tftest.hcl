@@ -88,14 +88,15 @@ run "bootstrap_naming_and_tags" {
   }
 
   assert {
-    condition = azurerm_resource_group.state.tags == {
+    condition = tomap(azurerm_resource_group.state.tags) == tomap({
       application = "terraform-state"
       managed-by  = "terraform-bootstrap"
       owner       = "platform-engineering"
       repository  = "github.com/hmcts/hmcts-dev-test-backend"
       environment = "shared"
       cost-centre = "technical-assessment"
-    }
+    })
+
     error_message = "The resource group must receive the merged governance tags."
   }
 
