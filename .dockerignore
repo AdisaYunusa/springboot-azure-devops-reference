@@ -1,0 +1,28 @@
+# Exclude local environment files that may contain secrets or credentials.
+# Keep the example file so developers can see the required variables.
+.env
+.env.*
+!.env.example
+
+# Exclude Git metadata because it is not required to build or run the application.
+.git/
+.gitignore
+
+# Exclude GitHub Actions workflow configuration.
+# CI/CD definitions are used by GitHub and are not required inside the application image.
+.github/
+
+# Exclude Terraform infrastructure-as-code files.
+# Infrastructure provisioning is separate from the application container build.
+terraform/
+
+# Exclude Gradle's local cache and previously generated build artefacts.
+.gradle/
+build/
+
+# Exclude IDE/editor configuration.
+.idea/
+.vscode/
+
+# Exclude local log files.
+*.log
